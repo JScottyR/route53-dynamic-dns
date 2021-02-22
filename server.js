@@ -1,5 +1,6 @@
 'use strict';
 
+
 //Dependencies
 const https = require('https');
 const fs = require('fs');
@@ -7,6 +8,7 @@ const dns = require('dns');
 const AWS = require('aws-sdk');
 const log4js = require('log4js');
 const dotenv = require('dotenv');
+const readline = require('readline');
 
 const ipChecker = {
     'opendns' : {
@@ -66,7 +68,6 @@ if (dotenvresult.error) {
 else {
     logger.info("Successfully loaded environment variables from .env file");
 }
-
 //Determine if required environment variables are set before starting to execute process
 if (typeof process.env.AWS_ACCESS_KEY_ID === 'undefined' || process.env.AWS_ACCESS_KEY_ID === null) {
     logger.error("AWS_ACCESS_KEY_ID is undefined or null in .env file or it was not set at runtime (ex: running Docker container).  Please define value for AWS_ACCESS_KEY_ID and try again.");
@@ -83,10 +84,6 @@ if (typeof process.env.AWS_REGION === 'undefined' || process.env.AWS_REGION === 
 if (typeof process.env.ROUTE53_HOSTED_ZONE_ID === 'undefined' || process.env.ROUTE53_HOSTED_ZONE_ID === null) {
     logger.error("ROUTE53_HOSTED_ZONE_ID is undefined or null in .env file or it was not set at runtime (ex: running Docker container).  Please define value for ROUTE53_HOSTED_ZONE_ID and try again.");
     throw "ROUTE53_HOSTED_ZONE_ID is undefined or null in .env file or it was not set at runtime (ex: running Docker container).  Please define value for ROUTE53_HOSTED_ZONE_ID and try again.";
-}
-if (typeof process.env.ROUTE53_DOMAIN === 'undefined' || process.env.ROUTE53_DOMAIN === null) {
-    logger.error("ROUTE53_DOMAIN is undefined or null in .env file or it was not set at runtime (ex: running Docker container).  Please define value for ROUTE53_DOMAIN and try again.");
-    throw "ROUTE53_DOMAIN is undefined or null in .env file or it was not set at runtime (ex: running Docker container).  Please define value for ROUTE53_DOMAIN and try again.";
 }
 if (typeof process.env.ROUTE53_TYPE === 'undefined' || process.env.ROUTE53_TYPE === null) {
     logger.error("ROUTE53_TYPE is undefined or null in .env file or it was not set at runtime (ex: running Docker container).  Please define value for ROUTE53_TYPE and try again.");
@@ -123,7 +120,13 @@ var AWS_ACCESS_KEY_ID = process.env.AWS_ACCESS_KEY_ID;
 var AWS_SECRET_ACCESS_KEY = process.env.AWS_SECRET_ACCESS_KEY;
 var AWS_REGION = process.env.AWS_REGION;
 var ROUTE53_HOSTED_ZONE_ID = process.env.ROUTE53_HOSTED_ZONE_ID;
-var ROUTE53_DOMAIN = process.env.ROUTE53_DOMAIN;
+
+var ROUTE53_DOMAINS = fs.readFileSync('domain_list', 'utf-8').split(',');
+for (var i in ROUTE53_DOMAINS)
+{
+    ROUTE53_DOMAINS[i] = ROUTE53_DOMAINS[i].trim();
+}
+
 var ROUTE53_TYPE = process.env.ROUTE53_TYPE;
 var ROUTE53_TTL = process.env.ROUTE53_TTL;
 var SES_TO_ADDRESS = process.env.SES_TO_ADDRESS;
@@ -213,24 +216,24 @@ var FindLastKnownIPLocally = function () {
         if (err && err.code === 'ENOENT') {
             //File doesn't exist.  Create a file with currentIP
             logger.info(LastKnownIPFileName, 'does not exist.  The file will be created');
-
+            logger.info('domain = ' + ROUTE53_DOMAINS[0]);
             var params = {
                 HostedZoneId: ROUTE53_HOSTED_ZONE_ID,
-                RecordName: ROUTE53_DOMAIN,
+                RecordName: ROUTE53_DOMAINS[0],
                 RecordType: ROUTE53_TYPE,
             };
 
-            logger.info('Initiating request to AWS Route53 (Method: testDNSAnswer) to get IP for', ROUTE53_DOMAIN, '(A Record)');
+            logger.info('Initiating request to AWS Route53 (Method: testDNSAnswer) to get IP for', ROUTE53_DOMAINS[0], '(A Record)');
             
             route53.testDNSAnswer(params, function(err, data) {
                 if (err) {
-                    logger.error('Unable to lookup', ROUTE53_DOMAIN, 'in AWS Route53 using AWS-SDK!  Error data below:\n', err, err.stack);
+                    logger.error('Unable to lookup', ROUTE53_DOMAINS[0], 'in AWS Route53 using AWS-SDK!  Error data below:\n', err, err.stack);
                     SendErrorNotificationEmail('An error occurred that needs to be reviewed.  Here are logs that are immediately available.<br /><br />' + err.message + '<br /><br />'+ err.stack);
                 }
                 else {
                     previousIP += data.RecordData;
                     //In this case only set currentIP = previousIP
-                    logger.info('AWS Route53 responded that', ROUTE53_DOMAIN, '(', ROUTE53_TYPE, 'Record) is pointing to', previousIP);
+                    logger.info('AWS Route53 responded that', ROUTE53_DOMAINS[0], '(', ROUTE53_TYPE, 'Record) is pointing to', previousIP);
                     //Update LastKnownIPFileName with current IP
                     WriteCurrentIPInLastKnownIPFileName(previousIP);
                 }
@@ -283,15 +286,18 @@ var CompareCurrentIPtoLastKnownIP = function () {
     else {
         //They don't match, so update Route53
         logger.info('Current Public IP does not match last known Public IP\nCurrent Public IP (' + ipChecker[IPCHECKER].fullname + '):', currentIP, '\nLast Known Public IP (', LastKnownIPFileName, '):', previousIP);
-        UpdateEntryInRoute53();
+        for (var i in ROUTE53_DOMAINS)
+        {
+            UpdateEntryInRoute53(ROUTE53_DOMAINS[i]);
+        }
     }
 };
 
 //Update AWS Route53 based on new IP address
-var UpdateEntryInRoute53 = function () {
+var UpdateEntryInRoute53 = function (domain) {
     //Prepare comment to be used in API call to AWS
     var paramsComment = null;
-    paramsComment = 'Updating public IP from ' + previousIP + ' to ' + currentIP + ' based on ISP change';
+    paramsComment = 'Updating public IP from ' + previousIP + ' to ' + currentIP + ' for ' + domain + ' based on ISP change';
 
     //Create params required by AWS-SDK for Route53
     var params = {
@@ -301,7 +307,7 @@ var UpdateEntryInRoute53 = function () {
         {
             Action: 'UPSERT',
             ResourceRecordSet: {
-            Name: ROUTE53_DOMAIN,
+            Name: domain,
             ResourceRecords: [
                 {
                 Value: currentIP
@@ -326,7 +332,7 @@ var UpdateEntryInRoute53 = function () {
         }
         else {
             // Successful response
-             logger.info('Request successfully submitted to AWS Route53 to update', ROUTE53_DOMAIN, '(' , ROUTE53_TYPE, 'record) with new Public IP:', currentIP, '\nAWS Route 53 response:\n', data);
+             logger.info('Request successfully submitted to AWS Route53 to update', domain, '(' , ROUTE53_TYPE, 'record) with new Public IP:', currentIP, '\nAWS Route 53 response:\n', data);
             //Update LastKnownIPFileName with new Public IP
             WriteCurrentIPInLastKnownIPFileName(currentIP);
             //Send email notifying user of change
@@ -386,8 +392,8 @@ var SendEmailNotificationAWSSES = function (EmailMessageType, EmailBodyErrorMess
     switch (EmailMessageType) {
         case "Route53":
             params.Message.Subject.Data = '[INFO]: Route53 Public IP Updated';
-            params.Message.Body.Html.Data = 'Request successfully submitted to AWS Route53 to update ' + ROUTE53_DOMAIN + ' (' + ROUTE53_TYPE + ' record) with new Public IP: ' + currentIP;
-            params.Message.Body.Text.Data = 'Request successfully submitted to AWS Route53 to update ' + ROUTE53_DOMAIN + ' (' + ROUTE53_TYPE + ' record) with new Public IP: ' + currentIP;
+            params.Message.Body.Html.Data = 'Request successfully submitted to AWS Route53 to update ' + ROUTE53_DOMAINS + ' (' + ROUTE53_TYPE + ' record) with new Public IP: ' + currentIP;
+            params.Message.Body.Text.Data = 'Request successfully submitted to AWS Route53 to update ' + ROUTE53_DOMAINS + ' (' + ROUTE53_TYPE + ' record) with new Public IP: ' + currentIP;
             break;
         case "Error":
             params.Message.Subject.Data = '[ERROR]: route53-dynamic-dns';
